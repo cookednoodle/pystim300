@@ -7,6 +7,7 @@ the optional ``[serial]`` extra installed.
 See the datasheet ``ts1524-r31-datasheet-stim300.pdf`` for protocol details.
 """
 
+from pystim300.client import AuditEvent, MemoryAuditor, Mode, STIM300
 from pystim300.configuration import Configuration
 from pystim300.datagrams import (
     BiasTrimDatagram,
@@ -23,12 +24,15 @@ from pystim300.exceptions import (
     TimeoutError,
 )
 from pystim300.normal import Measurement, NormalStreamParser
+from pystim300.service import ServiceResponse
 from pystim300.status import StatusByte
 from pystim300.transport import FakeTransport, SerialTransport, Transport
+from pystim300.utility import UtilityResponse
 
 __version__ = "0.1.0"
 
 __all__ = [
+    "AuditEvent",
     "BiasTrimDatagram",
     "CommandError",
     "Configuration",
@@ -36,15 +40,20 @@ __all__ = [
     "ExtendedErrorDatagram",
     "FakeTransport",
     "Measurement",
+    "MemoryAuditor",
+    "Mode",
     "ModeError",
     "NormalStreamParser",
     "PartNumberDatagram",
     "ProtocolError",
+    "STIM300",
     "SerialNumberDatagram",
     "SerialTransport",
+    "ServiceResponse",
     "Stim300Error",
     "StatusByte",
     "TimeoutError",
     "Transport",
+    "UtilityResponse",
     "__version__",
 ]
