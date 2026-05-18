@@ -256,3 +256,74 @@ class TestCrlfHandling:
         assert meas.counter + 1 in recovered
         assert meas.counter + 2 in recovered
         assert meas.counter + 3 in recovered
+
+
+class TestInitOnlyMode:
+    """``NormalStreamParser(configuration=None)`` parses only special datagrams."""
+
+    def test_part_number_decodes_without_configuration(self):
+        pn_payload = bytes(PART_NUMBER_PAYLOAD_LENGTH)
+        pn_frame = _make_special_frame(PART_NUMBER_IDS[0], pn_payload)
+
+        parser = NormalStreamParser(configuration=None)
+        records = list(parser.feed(pn_frame))
+        assert len(records) == 1
+        assert isinstance(records[0], PartNumberDatagram)
+
+    def test_full_init_sequence_decodes_without_configuration(self):
+        pn_frame = _make_special_frame(PART_NUMBER_IDS[0],
+                                         bytes(PART_NUMBER_PAYLOAD_LENGTH))
+        sn_payload = bytearray(SERIAL_NUMBER_PAYLOAD_LENGTH)
+        sn_payload[0] = ord("N")
+        sn_frame = _make_special_frame(SERIAL_NUMBER_IDS[0], bytes(sn_payload))
+        cfg_frame = _make_special_frame(0xBC, bytes(CONFIGURATION_PAYLOAD_LENGTH))
+        bt_frame = _make_special_frame(BIAS_TRIM_IDS[0], bytes(BIAS_TRIM_PAYLOAD_LENGTH))
+
+        parser = NormalStreamParser(configuration=None)
+        records = list(parser.feed(pn_frame + sn_frame + cfg_frame + bt_frame))
+        assert len(records) == 4
+        assert isinstance(records[0], PartNumberDatagram)
+        assert isinstance(records[1], SerialNumberDatagram)
+        assert isinstance(records[2], Configuration)
+        assert isinstance(records[3], BiasTrimDatagram)
+        assert parser.resync_events == 0
+
+    def test_normal_mode_bytes_treated_as_garbage_without_configuration(self):
+        # Normal-Mode-only IDs (0x90..0xA7, 0xF0..0xF7) must NOT decode when
+        # the parser has no configuration; they should be dropped as garbage
+        # rather than mis-parsed. Stream a valid special datagram afterwards
+        # to confirm resync (we follow with two specials so the parser has
+        # enough look-ahead to rule out any byte in the normal frame that
+        # happens to coincide with a special ID).
+        cfg = make_configuration(has_acceleration=True)
+        normal = build_normal_frame(make_measurement(cfg, counter=42), cfg)
+        sn_payload = bytearray(SERIAL_NUMBER_PAYLOAD_LENGTH)
+        sn_payload[0] = ord("N")
+        sn_frame = _make_special_frame(SERIAL_NUMBER_IDS[0], bytes(sn_payload))
+        pn_frame = _make_special_frame(PART_NUMBER_IDS[0],
+                                         bytes(PART_NUMBER_PAYLOAD_LENGTH))
+
+        parser = NormalStreamParser(configuration=None)
+        records = list(parser.feed(normal + sn_frame + pn_frame))
+        # The two specials decode; the normal-mode bytes are discarded.
+        assert len(records) == 2
+        assert isinstance(records[0], SerialNumberDatagram)
+        assert isinstance(records[1], PartNumberDatagram)
+        # Every byte of the original normal frame should be accounted for
+        # as discarded (the parser may have walked through bytes that
+        # coincidentally matched special IDs).
+        assert parser.bytes_discarded >= len(normal)
+
+    def test_update_to_real_configuration_enables_normal_mode_parsing(self):
+        # Start with no configuration; switch to a real one and the parser
+        # should now decode Normal-Mode frames.
+        cfg = make_configuration(has_acceleration=True)
+        normal = build_normal_frame(make_measurement(cfg, counter=7), cfg)
+
+        parser = NormalStreamParser(configuration=None)
+        assert list(parser.feed(b"")) == []
+        parser.update_configuration(cfg)
+        records = list(parser.feed(normal))
+        assert len(records) == 1
+        assert isinstance(records[0], Measurement)
+        assert records[0].counter == 7
