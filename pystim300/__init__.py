@@ -7,7 +7,35 @@ the optional ``[serial]`` extra installed.
 See the datasheet ``ts1524-r31-datasheet-stim300.pdf`` for protocol details.
 """
 
-from pystim300.client import AuditEvent, MemoryAuditor, Mode, STIM300
+from pystim300.checkout import (
+    CheckResult,
+    CheckoutReport,
+    ExpectedConfiguration,
+    check_bias_trim_present,
+    check_configuration,
+    check_extended_error_clean,
+    check_frame_rate,
+    check_gravity_direction_consistent,
+    check_gravity_magnitude,
+    check_gyro_quiescent,
+    check_inclinometer_gravity,
+    check_latency_within,
+    check_no_dropped_frames,
+    check_parser_clean,
+    check_part_number,
+    check_serial_number,
+    check_service_round_trip,
+    check_status_bytes_clean,
+    check_temperature_range,
+    check_utility_round_trip,
+)
+from pystim300.client import (
+    AuditEvent,
+    InitSequence,
+    MemoryAuditor,
+    Mode,
+    STIM300,
+)
 from pystim300.configuration import Configuration
 from pystim300.datagrams import (
     BiasTrimDatagram,
@@ -34,11 +62,15 @@ __version__ = "0.1.0"
 __all__ = [
     "AuditEvent",
     "BiasTrimDatagram",
+    "CheckResult",
+    "CheckoutReport",
     "CommandError",
     "Configuration",
     "CrcError",
+    "ExpectedConfiguration",
     "ExtendedErrorDatagram",
     "FakeTransport",
+    "InitSequence",
     "Measurement",
     "MemoryAuditor",
     "Mode",
@@ -56,4 +88,21 @@ __all__ = [
     "Transport",
     "UtilityResponse",
     "__version__",
+    "check_bias_trim_present",
+    "check_configuration",
+    "check_extended_error_clean",
+    "check_frame_rate",
+    "check_gravity_direction_consistent",
+    "check_gravity_magnitude",
+    "check_gyro_quiescent",
+    "check_inclinometer_gravity",
+    "check_latency_within",
+    "check_no_dropped_frames",
+    "check_parser_clean",
+    "check_part_number",
+    "check_serial_number",
+    "check_service_round_trip",
+    "check_status_bytes_clean",
+    "check_temperature_range",
+    "check_utility_round_trip",
 ]
