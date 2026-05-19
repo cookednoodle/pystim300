@@ -17,6 +17,11 @@ from typing import Callable, Iterator, List, Optional, Tuple
 from pystim300 import service as _service
 from pystim300 import utility as _utility
 from pystim300.configuration import Configuration
+from pystim300.datagrams import (
+    BiasTrimDatagram,
+    PartNumberDatagram,
+    SerialNumberDatagram,
+)
 from pystim300.exceptions import ModeError, ProtocolError, TimeoutError
 from pystim300.normal import Measurement, NormalStreamParser
 from pystim300.service import ServiceResponse
@@ -56,6 +61,24 @@ class AuditEvent:
 
 
 AuditCallback = Callable[[AuditEvent], None]
+
+
+@dataclass(frozen=True)
+class InitSequence:
+    """The Init-Mode datagram sequence captured immediately after power-on.
+
+    The STIM300 emits its Part Number, Serial Number, and Configuration
+    datagrams within ~1 s of power-up, followed by the Bias Trim datagram
+    iff ``bias_trim_at_startup`` is set in the configuration (§7.5.1, p.45).
+    ``raw`` is the full byte stream that was drained from the transport
+    during capture, retained for auditing.
+    """
+
+    part_number: PartNumberDatagram
+    serial_number: SerialNumberDatagram
+    configuration: Configuration
+    bias_trim: Optional[BiasTrimDatagram]
+    raw: bytes
 
 
 class MemoryAuditor:
@@ -127,6 +150,16 @@ class STIM300:
     @property
     def configuration(self) -> Optional[Configuration]:
         return self._configuration
+
+    @property
+    def stream_parser(self) -> Optional[NormalStreamParser]:
+        """The streaming parser used for Normal-Mode reads (None until configured).
+
+        Public so the functional-checkout primitives can read its
+        ``resync_events`` and ``bytes_discarded`` counters without poking
+        a private attribute.
+        """
+        return self._normal_parser
 
     def set_configuration(self, configuration: Configuration) -> None:
         """Tell the client what the device's current configuration is.
@@ -348,6 +381,116 @@ class STIM300:
         if self._mode not in (Mode.NORMAL, Mode.UNKNOWN):
             raise ModeError("Normal-Mode command requires NORMAL mode, currently {0}".format(self._mode))
         self._transport.write(wire)
+
+    # ------------------------------------------------------------------
+    # Init-Mode capture
+    # ------------------------------------------------------------------
+
+    def read_init_sequence(self, *, timeout: float = 10.0) -> "InitSequence":
+        """Drain Init-Mode datagrams from the transport into an ``InitSequence``.
+
+        Run this immediately after the device powers up (and after the
+        transport is opened). The STIM300 emits Part Number, Serial
+        Number, and Configuration datagrams within ~1 s of power-up; if
+        ``bias_trim_at_startup`` is set in the Configuration, a Bias Trim
+        datagram follows. The method also calls ``set_configuration`` so
+        the client is ready for Normal-Mode reads afterwards.
+
+        Raises ``TimeoutError`` if the full sequence does not arrive
+        within ``timeout`` seconds; the partial set of datagrams that
+        *did* arrive (if any) is attached to the exception's ``args``
+        tuple for diagnosis.
+        """
+        if self._mode not in (Mode.INIT, Mode.UNKNOWN, Mode.NORMAL):
+            raise ModeError("read_init_sequence requires INIT/UNKNOWN/NORMAL mode, "
+                            "currently {0}".format(self._mode))
+        parser = NormalStreamParser(configuration=None)
+        deadline = self._clock() + timeout
+        captured_raw = bytearray()
+        part_number: Optional[PartNumberDatagram] = None
+        serial_number: Optional[SerialNumberDatagram] = None
+        configuration: Optional[Configuration] = None
+        bias_trim: Optional[BiasTrimDatagram] = None
+
+        def _complete() -> bool:
+            if part_number is None or serial_number is None or configuration is None:
+                return False
+            if configuration.bias_trim_at_startup and bias_trim is None:
+                return False
+            return True
+
+        complete = False
+        while not complete:
+            remaining = deadline - self._clock()
+            if remaining <= 0:
+                self._raise_init_timeout(timeout, bytes(captured_raw),
+                                          part_number, serial_number,
+                                          configuration, bias_trim)
+            chunk = self._transport.read(_READ_CHUNK, timeout=remaining)
+            if not chunk:
+                if self._clock() >= deadline:
+                    self._raise_init_timeout(timeout, bytes(captured_raw),
+                                              part_number, serial_number,
+                                              configuration, bias_trim)
+                continue
+            captured_raw.extend(chunk)
+            for record in parser.feed(chunk):
+                if isinstance(record, PartNumberDatagram):
+                    part_number = record
+                elif isinstance(record, SerialNumberDatagram):
+                    serial_number = record
+                elif isinstance(record, Configuration):
+                    configuration = record
+                    # Once we know the configuration, key the streaming
+                    # parser used for subsequent read_records calls.
+                    self.set_configuration(record)
+                elif isinstance(record, BiasTrimDatagram):
+                    bias_trim = record
+                # Other record types are ignored during Init capture.
+                if _complete():
+                    complete = True
+                    break
+            if complete:
+                # Anything the temp parser hasn't consumed yet is real
+                # Normal-Mode data that arrived in the same read as the
+                # tail of the Init sequence. Hand it to the client's
+                # carry-over so the next read_records call sees it.
+                remaining_buf = bytes(parser._buffer)
+                if remaining_buf:
+                    self._carryover = remaining_buf + self._carryover
+
+        assert part_number is not None
+        assert serial_number is not None
+        assert configuration is not None
+        self._mode = Mode.NORMAL
+        return InitSequence(
+            part_number=part_number,
+            serial_number=serial_number,
+            configuration=configuration,
+            bias_trim=bias_trim,
+            raw=bytes(captured_raw),
+        )
+
+    @staticmethod
+    def _raise_init_timeout(timeout: float, raw: bytes,
+                              pn: Optional[PartNumberDatagram],
+                              sn: Optional[SerialNumberDatagram],
+                              cfg: Optional[Configuration],
+                              bt: Optional[BiasTrimDatagram]) -> None:
+        missing = []
+        if pn is None:
+            missing.append("PartNumber")
+        if sn is None:
+            missing.append("SerialNumber")
+        if cfg is None:
+            missing.append("Configuration")
+        elif cfg.bias_trim_at_startup and bt is None:
+            missing.append("BiasTrim")
+        raise TimeoutError(
+            "Init-Mode sequence incomplete after {0}s; missing: {1}; got {2} raw bytes".format(
+                timeout, ", ".join(missing) or "(none)", len(raw)),
+            raw, pn, sn, cfg, bt,
+        )
 
     # ------------------------------------------------------------------
     # Normal-Mode streaming

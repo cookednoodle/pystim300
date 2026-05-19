@@ -537,16 +537,20 @@ class _CandidateMatch:
         return 1 + self.payload_length + 4 + (2 if self.crlf else 0)
 
 
-def _candidates_for(head: int, configuration: Configuration) -> List[_CandidateMatch]:
+def _candidates_for(head: int, configuration: Optional[Configuration]) -> List[_CandidateMatch]:
     """Return all plausible frame layouts that could start with ``head``.
 
     The expected Normal-Mode ID is always offered first (with the configured
     CRLF flag). Any Init / on-demand special ID (interleaved by N/I/C/T/E
     commands) is offered too, in both CRLF and non-CRLF variants if the
     datasheet defines both.
+
+    When ``configuration`` is ``None`` (Init-Mode capture before a
+    Configuration has been observed) only special-datagram candidates are
+    considered; the Normal-Mode candidate is suppressed.
     """
     cands: List[_CandidateMatch] = []
-    if head == configuration.datagram_id:
+    if configuration is not None and head == configuration.datagram_id:
         spec = NORMAL_SPECS[head]
         cands.append(_CandidateMatch(
             datagram_id=head,
@@ -602,19 +606,25 @@ class NormalStreamParser:
     framing at the new head until a valid frame is found. The number of
     resync events (and bytes dropped) is exposed via ``resync_events`` /
     ``bytes_discarded`` for monitoring.
+
+    The configuration may be ``None`` to parse only Init-Mode / special
+    datagrams (Part Number, Serial Number, Configuration, Bias Trim,
+    Extended Error). This is the bootstrap path used by
+    ``STIM300.read_init_sequence`` before the device's Configuration is
+    known.
     """
 
-    def __init__(self, configuration: Configuration) -> None:
+    def __init__(self, configuration: Optional[Configuration] = None) -> None:
         self._configuration = configuration
         self._buffer = bytearray()
         self.resync_events = 0
         self.bytes_discarded = 0
 
     @property
-    def configuration(self) -> Configuration:
+    def configuration(self) -> Optional[Configuration]:
         return self._configuration
 
-    def update_configuration(self, configuration: Configuration) -> None:
+    def update_configuration(self, configuration: Optional[Configuration]) -> None:
         """Swap the active configuration mid-stream.
 
         Used after a successful Service-Mode reconfiguration. The buffer is

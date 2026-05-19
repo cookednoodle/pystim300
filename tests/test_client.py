@@ -4,13 +4,31 @@ import pytest
 
 from pystim300.client import (
     AuditEvent,
+    InitSequence,
     MemoryAuditor,
     Mode,
     STIM300,
 )
-from pystim300.crc import crc8_stim300
-from pystim300.exceptions import CommandError, ModeError
-from pystim300.normal import Measurement, build_normal_frame
+from pystim300.configuration import CONFIGURATION_PAYLOAD_LENGTH
+from pystim300.crc import crc8_stim300, crc32_stim300
+from pystim300.datagrams import (
+    BIAS_TRIM_IDS,
+    BIAS_TRIM_PAYLOAD_LENGTH,
+    BiasTrimDatagram,
+    PART_NUMBER_IDS,
+    PART_NUMBER_PAYLOAD_LENGTH,
+    PartNumberDatagram,
+    SERIAL_NUMBER_IDS,
+    SERIAL_NUMBER_PAYLOAD_LENGTH,
+    SerialNumberDatagram,
+)
+from pystim300.exceptions import CommandError, ModeError, TimeoutError
+from pystim300.normal import (
+    Measurement,
+    NormalStreamParser,
+    SPECIAL_SPECS,
+    build_normal_frame,
+)
 from pystim300.service import SERVICE_PROMPT
 from pystim300.transport import FakeTransport
 
@@ -206,6 +224,112 @@ class TestNormalFlow:
         client = STIM300(FakeTransport())
         with pytest.raises(ModeError):
             list(client.read_records(limit=1))
+
+
+def _build_special_frame(datagram_id: int, payload: bytes) -> bytes:
+    """Wire bytes for an Init-Mode special datagram."""
+    spec = SPECIAL_SPECS[datagram_id]
+    assert len(payload) == spec.payload_length
+    id_and_payload = bytes([datagram_id]) + payload
+    crc = crc32_stim300(id_and_payload + b"\x00" * spec.dummy_bytes)
+    frame = id_and_payload + crc.to_bytes(4, "big")
+    if datagram_id in {PART_NUMBER_IDS[1], SERIAL_NUMBER_IDS[1], 0xBD,
+                       BIAS_TRIM_IDS[1], 0xBF}:
+        frame += b"\r\n"
+    return frame
+
+
+def _build_configuration_payload(*, bias_trim_at_startup: bool = False) -> bytes:
+    """A minimal Configuration payload with no clusters, optional bias-trim flag."""
+    payload = bytearray(CONFIGURATION_PAYLOAD_LENGTH)
+    payload[0] = ord("-")   # revision_char
+    payload[1] = 31         # firmware_revision
+    payload[2] = 0b100_00000  # sample rate code 4 (2000Hz), no clusters, no CRLF
+    payload[3] = 0b0011_0_00_0  # bit-rate code 3 (1843200), 1 stop, parity none
+    if bias_trim_at_startup:
+        payload[20] |= 0x02
+    return bytes(payload)
+
+
+def _make_init_sequence_bytes(*, bias_trim: bool = False) -> bytes:
+    """Concatenated Init-Mode wire bytes (PN + SN + CFG [+ BT])."""
+    pn = _build_special_frame(PART_NUMBER_IDS[0],
+                                bytes(PART_NUMBER_PAYLOAD_LENGTH))
+    sn_payload = bytearray(SERIAL_NUMBER_PAYLOAD_LENGTH)
+    sn_payload[0] = ord("N")
+    # Set the seven serial bytes to BCD digits ("01234567890ABC" sort of)
+    sn_payload[1:8] = bytes([0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD])
+    sn = _build_special_frame(SERIAL_NUMBER_IDS[0], bytes(sn_payload))
+    cfg_payload = _build_configuration_payload(bias_trim_at_startup=bias_trim)
+    cfg = _build_special_frame(0xBC, cfg_payload)
+    parts = [pn, sn, cfg]
+    if bias_trim:
+        bt = _build_special_frame(BIAS_TRIM_IDS[0],
+                                    bytes(BIAS_TRIM_PAYLOAD_LENGTH))
+        parts.append(bt)
+    return b"".join(parts)
+
+
+class TestInitSequence:
+    def test_full_init_sequence_no_bias_trim(self):
+        transport = FakeTransport(initial=_make_init_sequence_bytes(bias_trim=False))
+        client = STIM300(transport)
+        client.set_mode(Mode.INIT)
+        seq = client.read_init_sequence(timeout=2.0)
+
+        assert isinstance(seq, InitSequence)
+        assert isinstance(seq.part_number, PartNumberDatagram)
+        assert isinstance(seq.serial_number, SerialNumberDatagram)
+        assert seq.bias_trim is None
+        assert seq.configuration.bias_trim_at_startup is False
+        # Client now knows its configuration and is back in Normal mode.
+        assert client.configuration is seq.configuration
+        assert client.mode == Mode.NORMAL
+        assert client.stream_parser is not None
+        # The raw stream is the full byte count we fed in.
+        assert len(seq.raw) == len(_make_init_sequence_bytes(bias_trim=False))
+
+    def test_full_init_sequence_with_bias_trim(self):
+        transport = FakeTransport(initial=_make_init_sequence_bytes(bias_trim=True))
+        client = STIM300(transport)
+        seq = client.read_init_sequence(timeout=2.0)
+
+        assert isinstance(seq.bias_trim, BiasTrimDatagram)
+        assert seq.configuration.bias_trim_at_startup is True
+
+    def test_timeout_when_no_data(self):
+        transport = FakeTransport(initial=b"")
+        client = STIM300(transport)
+        with pytest.raises(TimeoutError):
+            client.read_init_sequence(timeout=0.01)
+
+    def test_partial_sequence_times_out_with_diagnostic(self):
+        # PN only - SN and CFG missing.
+        partial = _build_special_frame(PART_NUMBER_IDS[0],
+                                         bytes(PART_NUMBER_PAYLOAD_LENGTH))
+        transport = FakeTransport(initial=partial)
+        client = STIM300(transport)
+        with pytest.raises(TimeoutError) as info:
+            client.read_init_sequence(timeout=0.05)
+        msg = str(info.value)
+        assert "SerialNumber" in msg
+        assert "Configuration" in msg
+
+    def test_bias_trim_required_when_configuration_says_so(self):
+        # CFG declares bias_trim_at_startup=True but we don't send it.
+        pn = _build_special_frame(PART_NUMBER_IDS[0],
+                                    bytes(PART_NUMBER_PAYLOAD_LENGTH))
+        sn_payload = bytearray(SERIAL_NUMBER_PAYLOAD_LENGTH)
+        sn_payload[0] = ord("N")
+        sn = _build_special_frame(SERIAL_NUMBER_IDS[0], bytes(sn_payload))
+        cfg = _build_special_frame(0xBC,
+                                     _build_configuration_payload(
+                                         bias_trim_at_startup=True))
+        transport = FakeTransport(initial=pn + sn + cfg)
+        client = STIM300(transport)
+        with pytest.raises(TimeoutError) as info:
+            client.read_init_sequence(timeout=0.05)
+        assert "BiasTrim" in str(info.value)
 
 
 class TestReset:

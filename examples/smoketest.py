@@ -111,8 +111,8 @@ def main(argv=None) -> int:
     print("Rate error:         {0:+.1f}%".format(
         100.0 * (achieved - args.expected_rate) / args.expected_rate))
     print("Counter-delta drops: {0}".format(drops))
-    print("Parser resyncs:     {0}".format(client._normal_parser.resync_events))
-    print("Bytes discarded:    {0}".format(client._normal_parser.bytes_discarded))
+    print("Parser resyncs:     {0}".format(client.stream_parser.resync_events))
+    print("Bytes discarded:    {0}".format(client.stream_parser.bytes_discarded))
     if flags_seen:
         print("STATUS flags seen:")
         for name, n in sorted(flags_seen.items()):

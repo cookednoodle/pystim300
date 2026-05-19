@@ -36,6 +36,32 @@ See `examples/read_normal.py` for a complete streaming example and
 `examples/smoketest.py` for a hardware bring-up script that reports
 achieved frame rate, dropped frames, and STATUS-byte flags.
 
+## Functional checkout
+
+`pystim300.checkout` provides the building blocks for a hardware
+functional-checkout procedure (Init-Mode capture, configuration
+cross-check, quiescent-IMU sanity checks, Service / Utility round-trip
+verification, Extended-Error inspection). Each `check_*` function is
+pure: it takes pre-collected data and returns a `CheckResult`. The
+results are gathered into a `CheckoutReport` with `summary()` and
+`to_json()` renderers.
+
+```python
+from pystim300 import STIM300, ExpectedConfiguration, check_gravity_magnitude
+
+client = STIM300(transport)
+init = client.read_init_sequence(timeout=5.0)   # PN + SN + CFG [+ BT]
+measurements = list(client.read_measurements(limit=200, include_startup=False))
+print(check_gravity_magnitude(measurements, expected_g=1.0, tolerance_g=0.05))
+```
+
+`examples/functional_checkout.py` demonstrates the recommended
+composition pattern: it wires every primitive into a single
+`run_checkout(transport, expected, ...)` function, runs the full
+procedure against a FakeTransport pre-loaded with synthesized device
+traffic, and writes a JSON report. Downstream test harnesses are
+expected to copy this shape and wire their own power-control around it.
+
 ## Service and Utility modes
 
 ```python
