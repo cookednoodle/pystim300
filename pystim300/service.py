@@ -27,6 +27,11 @@ SERVICE_PROMPT = b"\r>"
 SERVICE_TERMINATOR = b"\r"
 SERVICEMODE_ENTRY = b"SERVICEMODE\r"
 
+# Tail of the "SYSTEM RETURNING TO <mode> MODE." confirmation line that the
+# x (EXIT) command emits instead of the usual "\r>" prompt (Figures 9-49 /
+# 9-50, p.87).
+SERVICE_EXIT_MARKER = b"MODE."
+
 
 @dataclass(frozen=True)
 class ServiceResponse:
@@ -91,6 +96,50 @@ def parse_response(raw: bytes, command: str) -> ServiceResponse:
     if parts and parts[-1] == "":
         parts = parts[:-1]
     return ServiceResponse(command=command, lines=tuple(parts), raw=bytes(raw))
+
+
+def find_exit_response_end(buffer: bytes) -> int:
+    """Return the index of the first byte AFTER a complete x (EXIT) response.
+
+    The EXIT command is special: it does **not** end with the ``\\r>``
+    prompt, because the device leaves Service Mode. Two outcomes:
+
+    * **Success** - the device emits ``SYSTEM RETURNING TO <mode> MODE.``
+      followed by ``\\r`` and then resumes Normal- (or Init-) Mode
+      traffic (Figures 9-49 / 9-50, p.87). Located via the ``MODE.``
+      marker and the next ``\\r``.
+    * **Rejected parameter** - the device stays in Service Mode, emits an
+      ``E<nnn>`` error line and re-issues the usual ``\\r>`` prompt.
+
+    Returns the index just past whichever terminator appears first, or
+    -1 if neither has arrived yet. The success marker is checked first:
+    the error response contains no ``MODE.``, and on success the marker
+    matches inside the confirmation line before any binary datagrams
+    (which could contain stray ``\\r>`` bytes) arrive.
+    """
+    marker = buffer.find(SERVICE_EXIT_MARKER)
+    if marker >= 0:
+        cr = buffer.find(b"\r", marker)
+        if cr >= 0:
+            return cr + 1
+    prompt = buffer.find(SERVICE_PROMPT)
+    if prompt >= 0:
+        return prompt + len(SERVICE_PROMPT)
+    return -1
+
+
+def parse_exit_response(raw: bytes, command: str) -> ServiceResponse:
+    """Parse an x (EXIT) command response into a ``ServiceResponse``.
+
+    Unlike :func:`parse_response` this does not require a trailing
+    ``\\r>`` prompt - the EXIT response has none. ``raw`` is split on CR
+    and non-empty lines are kept; a rejected-parameter ``E<nnn>`` line is
+    preserved so :func:`detect_error` / :func:`raise_for_error` can
+    surface it.
+    """
+    text = raw.decode("ascii", errors="replace")
+    lines = tuple(part for part in text.split("\r") if part.strip())
+    return ServiceResponse(command=command, lines=lines, raw=bytes(raw))
 
 
 def detect_error(response: ServiceResponse) -> Optional[Tuple[int, str]]:
@@ -161,9 +210,19 @@ def cmd_restore_factory() -> str:
 def cmd_exit(*, to_normal: bool = True) -> str:
     """Build the ``x`` command - exit Service Mode.
 
-    Per §9 ``x``: ``x 0`` enters Init Mode, ``x 1`` enters Normal Mode.
+    Per §9.14 / Table 9-54 (p.87) the ``<exit_to>`` parameter is a
+    letter, not a digit. The upper-case forms are used here because they
+    exit immediately - no ``CONFIRM EXIT(Y/N)`` prompt even when there
+    are unsaved changes, and no 3 s hold-time - which is the
+    deterministic behaviour a programmatic caller wants:
+
+      * ``x N`` - terminate and return immediately to Normal Mode
+      * ``x I`` - terminate and return immediately to Init Mode
+
+    The lower-case ``n`` / ``i`` variants (interactive confirmation plus
+    hold-time) are intentionally not exposed.
     """
-    return "x 1" if to_normal else "x 0"
+    return "x N" if to_normal else "x I"
 
 
 def cmd_set_sample_rate(value: int) -> str:

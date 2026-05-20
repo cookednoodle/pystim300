@@ -114,13 +114,40 @@ class TestServiceFlow:
 
     def test_exit_service(self):
         banner = b"\r>"
-        exit_response = b"\r>"
+        # The EXIT response has no "\r>" prompt - the device leaves
+        # Service Mode (§9.14, Figures 9-49/9-50).
+        exit_response = b"SYSTEM RETURNING TO NORMAL MODE.\r"
         transport = FakeTransport(initial=banner + exit_response)
         client = STIM300(transport)
         client.enter_service()
-        client.exit_service()
+        resp = client.exit_service()
         assert client.mode == Mode.NORMAL
-        assert b"x 1\r" in bytes(transport.written)
+        assert b"x N\r" in bytes(transport.written)
+        assert "SYSTEM RETURNING TO NORMAL MODE." in resp.lines
+
+    def test_exit_service_to_init(self):
+        banner = b"\r>"
+        exit_response = b"SYSTEM RETURNING TO INIT MODE.\r"
+        transport = FakeTransport(initial=banner + exit_response)
+        client = STIM300(transport)
+        client.enter_service()
+        client.exit_service(to_init=True)
+        assert client.mode == Mode.INIT
+        assert b"x I\r" in bytes(transport.written)
+
+    def test_exit_service_rejected_parameter_raises(self):
+        # A rejected parameter keeps the device in Service Mode: it emits
+        # an E<nnn> line followed by the usual prompt.
+        banner = b"\r>"
+        exit_response = b"E003 INVALID PARAMETER\r>"
+        transport = FakeTransport(initial=banner + exit_response)
+        client = STIM300(transport)
+        client.enter_service()
+        with pytest.raises(CommandError) as info:
+            client.exit_service()
+        assert info.value.code == 3
+        # Mode must NOT have changed - the device stayed in Service Mode.
+        assert client.mode == Mode.SERVICE
 
     def test_service_command_wrong_mode_raises(self):
         client = STIM300(FakeTransport())
@@ -330,6 +357,26 @@ class TestInitSequence:
         with pytest.raises(TimeoutError) as info:
             client.read_init_sequence(timeout=0.05)
         assert "BiasTrim" in str(info.value)
+
+    def test_exit_service_to_init_then_read_init_sequence(self):
+        # exit_service(to_init=True) leaves the Init datagrams that follow
+        # "SYSTEM RETURNING TO INIT MODE." in the client's carry-over;
+        # read_init_sequence must drain it rather than dropping the first
+        # datagrams.
+        banner = b"\r>"
+        exit_response = b"SYSTEM RETURNING TO INIT MODE.\r"
+        init_bytes = _make_init_sequence_bytes(bias_trim=False)
+        transport = FakeTransport(initial=banner + exit_response + init_bytes)
+        client = STIM300(transport)
+        client.enter_service()
+        client.exit_service(to_init=True)
+        assert client.mode == Mode.INIT
+
+        seq = client.read_init_sequence(timeout=2.0)
+        assert isinstance(seq.part_number, PartNumberDatagram)
+        assert isinstance(seq.serial_number, SerialNumberDatagram)
+        assert client.mode == Mode.NORMAL
+        assert len(seq.raw) == len(init_bytes)
 
 
 class TestReset:

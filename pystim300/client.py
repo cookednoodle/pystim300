@@ -273,16 +273,28 @@ class STIM300:
 
     def exit_service(self, *, to_init: bool = False,
                       timeout: Optional[float] = None) -> ServiceResponse:
-        """Send ``x 1\\r`` (or ``x 0\\r``); read the closing prompt; switch mode."""
+        """Send ``x N\\r`` (Normal) or ``x I\\r`` (Init); switch mode.
+
+        Unlike every other Service-Mode command the EXIT response is not
+        terminated by the ``\\r>`` prompt - the device leaves Service
+        Mode and resumes Normal- (or Init-) Mode traffic (§9.14, Figures
+        9-49 / 9-50). On success the device emits ``SYSTEM RETURNING TO
+        <mode> MODE.``; a rejected parameter instead yields an
+        ``E<nnn>`` error and the device stays in Service Mode (so the
+        ``CommandError`` is raised before the tracked mode changes).
+        """
         if self._mode != Mode.SERVICE:
             raise ModeError("exit_service requires SERVICE mode, currently {0}".format(self._mode))
         cmd = _service.cmd_exit(to_normal=not to_init)
-        response = self.service_command(cmd, timeout=timeout)
+        self._write(Mode.SERVICE, _service.encode_command(cmd))
+        raw = self._read_until(_service.find_exit_response_end, Mode.SERVICE,
+                                 timeout=timeout)
+        response = _service.parse_exit_response(raw, cmd)
+        _service.raise_for_error(response)
         self._mode = Mode.INIT if to_init else Mode.NORMAL
-        if self._normal_parser is not None:
+        if self._normal_parser is not None and self._configuration is not None:
             # Re-key so the next stream chunk starts fresh.
-            self._normal_parser.update_configuration(self._configuration) \
-                if self._configuration is not None else None
+            self._normal_parser.update_configuration(self._configuration)
         return response
 
     def service_command(self, command: str, *,
@@ -419,20 +431,31 @@ class STIM300:
                 return False
             return True
 
+        # Bytes left over from a prior read (e.g. the Init datagrams that
+        # arrive right after exit_service(to_init=True)) must be consumed
+        # before reading from the transport, or the first datagrams would
+        # be lost.
+        pending = self._carryover
+        self._carryover = b""
+
         complete = False
         while not complete:
-            remaining = deadline - self._clock()
-            if remaining <= 0:
-                self._raise_init_timeout(timeout, bytes(captured_raw),
-                                          part_number, serial_number,
-                                          configuration, bias_trim)
-            chunk = self._transport.read(_READ_CHUNK, timeout=remaining)
-            if not chunk:
-                if self._clock() >= deadline:
+            if pending:
+                chunk = pending
+                pending = b""
+            else:
+                remaining = deadline - self._clock()
+                if remaining <= 0:
                     self._raise_init_timeout(timeout, bytes(captured_raw),
                                               part_number, serial_number,
                                               configuration, bias_trim)
-                continue
+                chunk = self._transport.read(_READ_CHUNK, timeout=remaining)
+                if not chunk:
+                    if self._clock() >= deadline:
+                        self._raise_init_timeout(timeout, bytes(captured_raw),
+                                                  part_number, serial_number,
+                                                  configuration, bias_trim)
+                    continue
             captured_raw.extend(chunk)
             for record in parser.feed(chunk):
                 if isinstance(record, PartNumberDatagram):
