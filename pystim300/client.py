@@ -313,13 +313,18 @@ class STIM300:
         return response
 
     def enter_utility(self, *, timeout: Optional[float] = None) -> UtilityResponse:
-        """Send ``UTILITYMODE\\r``; read the ``#UTILITYMODE,234\\r`` acknowledgement."""
+        """Send ``UTILITYMODE\\r``; read the ``#UTILITYMODE,234\\r`` acknowledgement.
+
+        The acknowledgement is preceded by the tail of the in-progress
+        Normal-Mode datagram (§8.8 note), so a preamble-tolerant sentinel
+        and parser are used to skip those binary bytes.
+        """
         if self._mode not in (Mode.NORMAL, Mode.UNKNOWN):
             raise ModeError("enter_utility requires NORMAL mode, currently {0}".format(self._mode))
         self._carryover = b""
         self._write(Mode.NORMAL, _utility.UTILITYMODE_ENTRY)
-        raw = self._read_until(_utility.find_response_end, Mode.UTILITY, timeout=timeout)
-        response = _utility.parse_response(raw)
+        raw = self._read_until(_utility.find_entry_response_end, Mode.UTILITY, timeout=timeout)
+        response = _utility.parse_entry_response(raw)
         self._mode = Mode.UTILITY
         return response
 

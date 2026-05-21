@@ -35,6 +35,12 @@ from pystim300.exceptions import CommandError, CrcError, ProtocolError
 UTILITYMODE_ENTRY = b"UTILITYMODE\r"
 UTILITY_TERMINATOR = b"\r"
 
+# Fixed prefix of the Utility-Mode entry acknowledgement ``#UTILITYMODE,<crc8>\r``
+# (Figure 10-1, p.99). Used to anchor the entry-response sentinel past the
+# binary Normal-Mode datagram tail that precedes the ack: per the §8.8 note
+# the device finishes the in-progress datagram before acknowledging.
+UTILITYMODE_ACK_MARKER = b"#UTILITYMODE,"
+
 # Status-code descriptions per Table 10-2 (p.100).
 STATUS_DESCRIPTIONS = {
     0: "OK",
@@ -93,11 +99,42 @@ def find_response_end(buffer: bytes) -> int:
 
     Utility-Mode responses are terminated by a single CR (§10.2.2). Returns
     -1 if no terminator has arrived yet.
+
+    This is the sentinel for command responses sent *inside* an established
+    Utility-Mode session, where the device is silent until it replies so the
+    first CR is always the terminator. The entry acknowledgement is special -
+    it is preceded by a binary datagram tail - so :func:`find_entry_response_end`
+    handles that case instead.
     """
     idx = buffer.find(UTILITY_TERMINATOR)
     if idx < 0:
         return -1
     return idx + len(UTILITY_TERMINATOR)
+
+
+def find_entry_response_end(buffer: bytes) -> int:
+    """Return the index of the first byte AFTER a complete entry acknowledgement.
+
+    Entering Utility Mode is special: the ``UTILITYMODE`` command is sent
+    while Normal-Mode binary streaming is still running, and per the §8.8
+    note the device finishes transmitting the in-progress datagram before
+    emitting the ``#UTILITYMODE,<crc8>\\r`` acknowledgement. The host
+    therefore receives a tail of binary datagram bytes *before* the ack, and
+    those bytes routinely contain stray ``\\r`` (0x0D) - so the plain
+    first-CR sentinel of :func:`find_response_end` would latch inside the
+    binary preamble.
+
+    This sentinel anchors on the fixed ``#UTILITYMODE,`` marker and then the
+    next ``\\r``, skipping any binary preamble. Returns -1 if the marker or
+    its terminating CR has not arrived yet.
+    """
+    marker = buffer.find(UTILITYMODE_ACK_MARKER)
+    if marker < 0:
+        return -1
+    cr = buffer.find(UTILITY_TERMINATOR, marker)
+    if cr < 0:
+        return -1
+    return cr + len(UTILITY_TERMINATOR)
 
 
 def parse_response(raw: bytes) -> UtilityResponse:
@@ -157,6 +194,24 @@ def parse_response(raw: bytes) -> UtilityResponse:
         fields=tuple(payload[1:]),
         raw=bytes(raw),
     )
+
+
+def parse_entry_response(raw: bytes) -> UtilityResponse:
+    """Parse the Utility-Mode entry acknowledgement ``#UTILITYMODE,<crc8>\\r``.
+
+    ``raw`` may carry a leading binary preamble - the tail of the
+    Normal-Mode datagram the device finishes before acknowledging (§8.8
+    note). Everything before the ``#UTILITYMODE,`` marker is stripped, then
+    the remainder is handed to :func:`parse_response` (whose
+    ``UTILITYMODE`` special case yields a status-0 response). The returned
+    ``UtilityResponse.raw`` is the clean acknowledgement only, preamble
+    excluded. Raises ``ProtocolError`` if the marker is absent.
+    """
+    idx = raw.find(UTILITYMODE_ACK_MARKER)
+    if idx < 0:
+        raise ProtocolError(
+            "Utility entry acknowledgement not found: {0!r}".format(raw))
+    return parse_response(raw[idx:])
 
 
 def raise_for_error(response: UtilityResponse) -> UtilityResponse:

@@ -12,7 +12,9 @@ from pystim300.utility import (
     cmd_set_datagram,
     cmd_set_sample_rate,
     encode_command,
+    find_entry_response_end,
     find_response_end,
+    parse_entry_response,
     parse_response,
     raise_for_error,
 )
@@ -20,6 +22,14 @@ from pystim300.utility import (
 
 def _crc_of(s: str) -> int:
     return crc8_stim300(s.encode("ascii"))
+
+
+# Entry acknowledgement bytes, per Figure 10-1 (CRC 234 over "#UTILITYMODE,").
+_ENTRY_ACK = b"#UTILITYMODE,234\r"
+# A binary Normal-Mode datagram tail; per the §8.8 note the device finishes the
+# in-progress datagram before sending the ack. It deliberately contains stray
+# CR (0x0D) bytes - the case the plain first-CR sentinel cannot survive.
+_BINARY_PREAMBLE = b"\x92\x0d\x47\x00\x0d\x8e\xff\x0d\x01"
 
 
 class TestEncodeCommand:
@@ -57,6 +67,24 @@ class TestFindResponseEnd:
     def test_cr_at_end(self):
         data = b"#isn,0,N123,32\r"
         assert find_response_end(data) == len(data)
+
+
+class TestFindEntryResponseEnd:
+    def test_clean_ack(self):
+        assert find_entry_response_end(_ENTRY_ACK) == len(_ENTRY_ACK)
+
+    def test_skips_binary_preamble_with_embedded_cr(self):
+        # The §8.8 datagram tail before the ack carries stray 0x0D bytes; the
+        # sentinel must anchor on the "#UTILITYMODE," marker, not the first CR.
+        data = _BINARY_PREAMBLE + _ENTRY_ACK
+        assert find_entry_response_end(data) == len(data)
+
+    def test_marker_present_but_cr_not_yet_arrived(self):
+        assert find_entry_response_end(_BINARY_PREAMBLE + b"#UTILITYMODE,234") == -1
+
+    def test_no_marker_returns_minus_one(self):
+        assert find_entry_response_end(_BINARY_PREAMBLE) == -1
+        assert find_entry_response_end(b"") == -1
 
 
 class TestParseResponse:
@@ -116,6 +144,26 @@ class TestParseResponse:
         raw = (body + str(crc) + "\r").encode("ascii")
         with pytest.raises(ProtocolError):
             parse_response(raw)
+
+
+class TestParseEntryResponse:
+    def test_clean_ack(self):
+        resp = parse_entry_response(_ENTRY_ACK)
+        assert resp.command == "UTILITYMODE"
+        assert resp.status == 0
+        assert resp.fields == ()
+        assert resp.raw == _ENTRY_ACK
+
+    def test_strips_binary_preamble(self):
+        resp = parse_entry_response(_BINARY_PREAMBLE + _ENTRY_ACK)
+        assert resp.command == "UTILITYMODE"
+        assert resp.status == 0
+        # raw is the clean acknowledgement only - preamble excluded.
+        assert resp.raw == _ENTRY_ACK
+
+    def test_no_marker_raises(self):
+        with pytest.raises(ProtocolError):
+            parse_entry_response(_BINARY_PREAMBLE)
 
 
 class TestStatusCodes:
