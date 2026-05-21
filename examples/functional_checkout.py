@@ -67,6 +67,7 @@ from pystim300 import (
     check_utility_round_trip,
 )
 from pystim300.checkout import CheckResult
+from pystim300.exceptions import TimeoutError
 from pystim300.transport import SerialTransport, Transport
 
 from examples.demo_transport import (
@@ -183,11 +184,10 @@ def run_checkout(transport: Transport,
     # --- 6. Extended Error -------------------------------------------
     eed: Optional[ExtendedErrorDatagram] = None
     if read_extended_error:
-        client.request_extended_error()
-        for record in client.read_records(limit=10, timeout=init_timeout):
-            if isinstance(record, ExtendedErrorDatagram):
-                eed = record
-                break
+        try:
+            eed = client.read_extended_error(timeout=init_timeout)
+        except TimeoutError:
+            eed = None
         checks.append(check_extended_error_clean(
             eed, ignore_bits=expected.extended_error_ignore_bits))
 
