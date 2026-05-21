@@ -262,9 +262,15 @@ class STIM300:
         banner (same content as the ``i`` command, Figure 9-21). The
         banner ends with the ``\\r>`` prompt, which is the framing marker
         for all subsequent Service-Mode reads.
+
+        The OS serial buffer is flushed first: the command is issued while
+        Normal-Mode binary is still streaming, and any backlog that piled
+        up while the caller was idle would otherwise delay - or, on
+        overflow, swallow - the banner.
         """
         if self._mode not in (Mode.NORMAL, Mode.UNKNOWN):
             raise ModeError("enter_service requires NORMAL mode, currently {0}".format(self._mode))
+        self._transport.reset_input()
         self._carryover = b""
         self._write(Mode.NORMAL, _service.SERVICEMODE_ENTRY)
         raw = self._read_until(_service.find_response_end, Mode.SERVICE, timeout=timeout)
@@ -318,9 +324,16 @@ class STIM300:
         The acknowledgement is preceded by the tail of the in-progress
         Normal-Mode datagram (§8.8 note), so a preamble-tolerant sentinel
         and parser are used to skip those binary bytes.
+
+        The OS serial buffer is flushed first. ``UTILITYMODE`` is sent while
+        Normal-Mode binary is still streaming (~230 KB/s at the factory bit
+        rate); a backlog accumulated while the caller was idle would
+        otherwise take longer than the read timeout to drain - or overflow
+        the buffer and drop the ``#UTILITYMODE,234`` ack outright.
         """
         if self._mode not in (Mode.NORMAL, Mode.UNKNOWN):
             raise ModeError("enter_utility requires NORMAL mode, currently {0}".format(self._mode))
+        self._transport.reset_input()
         self._carryover = b""
         self._write(Mode.NORMAL, _utility.UTILITYMODE_ENTRY)
         raw = self._read_until(_utility.find_entry_response_end, Mode.UTILITY, timeout=timeout)

@@ -33,10 +33,17 @@ class Transport(Protocol):
     bytes) when the optional timeout elapses with nothing read. The
     streaming parser tolerates short reads, so transports should not block
     forever waiting for exactly ``n`` bytes.
+
+    ``reset_input`` discards any buffered-but-unread input. The client calls
+    it just before a mode-entry handshake (``SERVICEMODE`` / ``UTILITYMODE``)
+    so the device's acknowledgement is not lost behind - or to an overflow
+    of - the seconds of Normal-Mode binary that pile up in the OS serial
+    buffer while the application is idle.
     """
 
     def read(self, n: int, timeout: Optional[float] = None) -> bytes: ...
     def write(self, data: bytes) -> None: ...
+    def reset_input(self) -> None: ...
     def close(self) -> None: ...
 
 
@@ -65,6 +72,7 @@ class FakeTransport:
         self.written = bytearray()
         self._script: Deque[Tuple[bytes, bytes]] = deque(scripted or ())
         self._closed = False
+        self.reset_input_calls = 0
 
     def feed(self, data: bytes) -> None:
         """Append ``data`` to the bytes the next ``read`` will draw from."""
@@ -93,6 +101,16 @@ class FakeTransport:
                     "scripted write mismatch: expected prefix {0!r}, got {1!r}".format(
                         expected_prefix, data))
             self._read_buf.extend(reply)
+
+    def reset_input(self) -> None:
+        """Record a flush request; leave the pre-loaded read buffer intact.
+
+        A real OS serial buffer accumulates stale bytes; ``FakeTransport``
+        has none - its read buffer is exactly the byte stream the test
+        scripted. Clearing it here would just delete intended test input,
+        so this only bumps ``reset_input_calls`` for call-site assertions.
+        """
+        self.reset_input_calls += 1
 
     def close(self) -> None:
         self._closed = True
@@ -164,6 +182,10 @@ class SerialTransport:
     def write(self, data: bytes) -> None:
         self._serial.write(data)
         self._serial.flush()
+
+    def reset_input(self) -> None:
+        """Discard the OS serial input buffer (``tcflush`` / ``PurgeComm``)."""
+        self._serial.reset_input_buffer()
 
     def close(self) -> None:
         if self._serial.is_open:

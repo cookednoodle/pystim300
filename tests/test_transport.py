@@ -51,6 +51,15 @@ class TestFakeTransport:
         assert ft.read(0) == b""
         assert ft.read(-1) == b""
 
+    def test_reset_input_counts_without_clearing_buffer(self):
+        ft = FakeTransport(b"abc")
+        assert ft.reset_input_calls == 0
+        ft.reset_input()
+        ft.reset_input()
+        assert ft.reset_input_calls == 2
+        # FakeTransport has no OS buffer; pre-loaded data is left intact.
+        assert ft.read(3) == b"abc"
+
 
 class TestFakeTransportScripted:
     def test_scripted_request_response(self):
