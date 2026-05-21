@@ -125,6 +125,23 @@ class TestServiceFlow:
         assert b"x N\r" in bytes(transport.written)
         assert "SYSTEM RETURNING TO NORMAL MODE." in resp.lines
 
+    def test_exit_service_real_hardware_no_period(self):
+        # Real TS1524 r.31 capture: the device echoes the command and emits
+        # the success line WITHOUT the trailing period the datasheet figures
+        # show, then resumes binary Normal-Mode traffic. Regression: this
+        # used to time out because the sentinel required the "MODE." period.
+        banner = b"\r>"
+        exit_response = b"x N\rSYSTEM RETURNING TO NORMAL MODE\r\x93\x00\x01\x80"
+        transport = FakeTransport(initial=banner + exit_response)
+        client = STIM300(transport)
+        client.enter_service()
+        resp = client.exit_service()
+        assert client.mode == Mode.NORMAL
+        assert "SYSTEM RETURNING TO NORMAL MODE" in resp.lines
+        # Bytes past the confirmation line are Normal-Mode traffic; they go
+        # to carry-over for the next read, not into the EXIT response.
+        assert client._carryover == b"\x93\x00\x01\x80"
+
     def test_exit_service_to_init(self):
         banner = b"\r>"
         exit_response = b"SYSTEM RETURNING TO INIT MODE.\r"

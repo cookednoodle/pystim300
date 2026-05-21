@@ -27,10 +27,13 @@ SERVICE_PROMPT = b"\r>"
 SERVICE_TERMINATOR = b"\r"
 SERVICEMODE_ENTRY = b"SERVICEMODE\r"
 
-# Tail of the "SYSTEM RETURNING TO <mode> MODE." confirmation line that the
-# x (EXIT) command emits instead of the usual "\r>" prompt (Figures 9-49 /
-# 9-50, p.87).
-SERVICE_EXIT_MARKER = b"MODE."
+# Stable prefix of the "SYSTEM RETURNING TO <mode> MODE" confirmation line
+# that the x (EXIT) command emits instead of the usual "\r>" prompt (Figures
+# 9-49 / 9-50, p.88). The datasheet figures show a trailing period, but real
+# TS1524 r.31 firmware omits it ("SYSTEM RETURNING TO NORMAL MODE\r"), so the
+# marker anchors on the period-independent line prefix - common to both the
+# NORMAL and INIT variants - and the sentinel then scans to the line's CR.
+SERVICE_EXIT_MARKER = b"SYSTEM RETURNING TO"
 
 
 @dataclass(frozen=True)
@@ -104,18 +107,22 @@ def find_exit_response_end(buffer: bytes) -> int:
     The EXIT command is special: it does **not** end with the ``\\r>``
     prompt, because the device leaves Service Mode. Two outcomes:
 
-    * **Success** - the device emits ``SYSTEM RETURNING TO <mode> MODE.``
+    * **Success** - the device emits ``SYSTEM RETURNING TO <mode> MODE``
       followed by ``\\r`` and then resumes Normal- (or Init-) Mode
-      traffic (Figures 9-49 / 9-50, p.87). Located via the ``MODE.``
-      marker and the next ``\\r``.
+      traffic (Figures 9-49 / 9-50, p.88). Located via the
+      ``SYSTEM RETURNING TO`` marker and the next ``\\r``.
     * **Rejected parameter** - the device stays in Service Mode, emits an
       ``E<nnn>`` error line and re-issues the usual ``\\r>`` prompt.
 
     Returns the index just past whichever terminator appears first, or
     -1 if neither has arrived yet. The success marker is checked first:
-    the error response contains no ``MODE.``, and on success the marker
-    matches inside the confirmation line before any binary datagrams
-    (which could contain stray ``\\r>`` bytes) arrive.
+    the error response does not contain ``SYSTEM RETURNING TO``, and on
+    success the marker matches inside the confirmation line before any
+    binary datagrams (which could contain stray ``\\r>`` bytes) arrive.
+    The marker is the line prefix, not its tail, so it matches whether or
+    not the firmware appends the trailing period the datasheet shows, and
+    the ``\\r`` search starts at the marker so the echoed ``x N\\r`` that
+    precedes it on real hardware is skipped.
     """
     marker = buffer.find(SERVICE_EXIT_MARKER)
     if marker >= 0:

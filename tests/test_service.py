@@ -71,8 +71,21 @@ class TestFindExitResponseEnd:
         data = b"SYSTEM RETURNING TO INIT MODE.\r\x90\x00\x01\r>"
         assert find_exit_response_end(data) == len(b"SYSTEM RETURNING TO INIT MODE.\r")
 
+    def test_finds_success_line_without_trailing_period(self):
+        # Real TS1524 r.31 firmware omits the period the datasheet figures
+        # show, and echoes the command first: "x N\rSYSTEM RETURNING TO
+        # NORMAL MODE\r". The marker anchors on the line prefix, so it
+        # matches and the CR search skips the echoed "x N\r".
+        data = b"x N\rSYSTEM RETURNING TO NORMAL MODE\r"
+        assert find_exit_response_end(data) == len(data)
+
+    def test_no_period_marker_before_trailing_binary(self):
+        data = b"x N\rSYSTEM RETURNING TO NORMAL MODE\r\x93\x00\x01\x80"
+        assert find_exit_response_end(data) == len(b"x N\rSYSTEM RETURNING TO NORMAL MODE\r")
+
     def test_success_marker_present_but_cr_not_yet_arrived(self):
         assert find_exit_response_end(b"SYSTEM RETURNING TO NORMAL MODE.") == -1
+        assert find_exit_response_end(b"x N\rSYSTEM RETURNING TO NORMAL MODE") == -1
 
     def test_falls_back_to_prompt_on_rejected_parameter(self):
         # A bad parameter keeps the device in Service Mode: E<nnn> + prompt.
@@ -93,6 +106,13 @@ class TestParseExitResponse:
         raw = b"x N\rSYSTEM RETURNING TO NORMAL MODE.\r"
         resp = parse_exit_response(raw, "x N")
         assert resp.lines == ("x N", "SYSTEM RETURNING TO NORMAL MODE.")
+
+    def test_success_line_without_trailing_period(self):
+        # The exact real-hardware capture: echo + period-less success line.
+        raw = b"x N\rSYSTEM RETURNING TO NORMAL MODE\r"
+        resp = parse_exit_response(raw, "x N")
+        assert resp.lines == ("x N", "SYSTEM RETURNING TO NORMAL MODE")
+        assert detect_error(resp) is None
 
     def test_rejected_parameter_surfaces_through_raise_for_error(self):
         raw = b"E003 INVALID PARAMETER\r>"
