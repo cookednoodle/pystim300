@@ -16,7 +16,9 @@ from pystim300.service import (
     cmd_single_shot,
     detect_error,
     encode_command,
+    find_exit_response_end,
     find_response_end,
+    parse_exit_response,
     parse_response,
     raise_for_error,
 )
@@ -52,6 +54,53 @@ class TestFindResponseEnd:
         # Useful for buffered streams where the next response also lurks.
         data = b"first\r>second"
         assert find_response_end(data) == len(b"first\r>")
+
+
+class TestFindExitResponseEnd:
+    def test_incomplete_buffer_returns_minus_one(self):
+        assert find_exit_response_end(b"SYSTEM RETURNING TO NORMAL ") == -1
+        assert find_exit_response_end(b"") == -1
+
+    def test_finds_success_confirmation_line(self):
+        data = b"SYSTEM RETURNING TO NORMAL MODE.\r"
+        assert find_exit_response_end(data) == len(data)
+
+    def test_success_marker_before_trailing_binary(self):
+        # The device resumes Normal-Mode traffic right after the line; the
+        # sentinel must stop at the CR, not scan into the binary tail.
+        data = b"SYSTEM RETURNING TO INIT MODE.\r\x90\x00\x01\r>"
+        assert find_exit_response_end(data) == len(b"SYSTEM RETURNING TO INIT MODE.\r")
+
+    def test_success_marker_present_but_cr_not_yet_arrived(self):
+        assert find_exit_response_end(b"SYSTEM RETURNING TO NORMAL MODE.") == -1
+
+    def test_falls_back_to_prompt_on_rejected_parameter(self):
+        # A bad parameter keeps the device in Service Mode: E<nnn> + prompt.
+        data = b"E003 INVALID PARAMETER\r>"
+        assert find_exit_response_end(data) == len(data)
+
+
+class TestParseExitResponse:
+    def test_success_line(self):
+        raw = b"SYSTEM RETURNING TO NORMAL MODE.\r"
+        resp = parse_exit_response(raw, "x N")
+        assert resp.command == "x N"
+        assert resp.lines == ("SYSTEM RETURNING TO NORMAL MODE.",)
+        assert resp.raw == raw
+
+    def test_keeps_echoed_command_line(self):
+        # Real hardware echoes the command; harmless extra line.
+        raw = b"x N\rSYSTEM RETURNING TO NORMAL MODE.\r"
+        resp = parse_exit_response(raw, "x N")
+        assert resp.lines == ("x N", "SYSTEM RETURNING TO NORMAL MODE.")
+
+    def test_rejected_parameter_surfaces_through_raise_for_error(self):
+        raw = b"E003 INVALID PARAMETER\r>"
+        resp = parse_exit_response(raw, "x N")
+        assert detect_error(resp) == (3, "INVALID PARAMETER")
+        with pytest.raises(CommandError) as info:
+            raise_for_error(resp)
+        assert info.value.code == 3
 
 
 class TestParseResponse:
@@ -130,8 +179,9 @@ class TestCommandBuilders:
         assert cmd_save() == "s"
 
     def test_exit(self):
-        assert cmd_exit(to_normal=True) == "x 1"
-        assert cmd_exit(to_normal=False) == "x 0"
+        # §9.14 / Table 9-54: upper-case letter parameter, not a digit.
+        assert cmd_exit(to_normal=True) == "x N"
+        assert cmd_exit(to_normal=False) == "x I"
 
     @pytest.mark.parametrize("code", [0, 1, 2, 3, 4, 5])
     def test_set_sample_rate_valid(self, code):

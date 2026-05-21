@@ -358,7 +358,7 @@ def _build_demo_transport(measurement_count: int) -> FakeTransport:
     # Scripted writes: each Service/Utility/E request triggers its reply.
     service_banner = b"PRODUCT = STIM300\rREV = -\r>"
     i_d_reply = b"datagram = a7,no\r>"
-    exit_service_reply = b"\r>"
+    exit_service_reply = b"SYSTEM RETURNING TO NORMAL MODE.\r"
     utility_ack = _utility_reply("#UTILITYMODE,")
     isn_reply = _utility_reply("#isn,0,{0},".format(_DEMO_SERIAL_NUMBER))
     xn_reply = _utility_reply("#xn,0,")
@@ -368,7 +368,7 @@ def _build_demo_transport(measurement_count: int) -> FakeTransport:
     scripted = [
         (b"SERVICEMODE\r", service_banner),
         (b"i d\r", i_d_reply),
-        (b"x 1\r", exit_service_reply),
+        (b"x N\r", exit_service_reply),
         (b"UTILITYMODE\r", utility_ack),
         (b"$isn,", isn_reply),
         (b"$xn,", xn_reply),
