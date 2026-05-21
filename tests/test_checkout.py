@@ -137,6 +137,12 @@ class TestIdentityChecks:
         assert check_serial_number(sn, None).passed is True
         assert check_serial_number(sn, frozenset()).passed is True
 
+    def test_serial_number_allowed_entry_with_n_prefix(self):
+        # An allowed serial may be listed with or without the 'N' prefix;
+        # the Init-Mode datagram reports it stripped.
+        sn = _make_sn("25582405002002")
+        assert check_serial_number(sn, frozenset({"N25582405002002"})).passed is True
+
 
 class TestConfigurationChecks:
     def test_all_matching_fields_pass(self):
@@ -403,6 +409,14 @@ class TestRoundTripChecks:
         result = check_utility_round_trip(response, sn)
         assert result.passed is False
         assert "12345678901234" in result.detail
+
+    def test_utility_round_trip_normalizes_n_prefix(self):
+        # Utility Mode reports the serial with its fixed 'N' prefix;
+        # the Init-Mode datagram reports it stripped. They still match.
+        response = UtilityResponse(command="isn", status=0,
+                                     fields=("N25582405002002",), raw=b"")
+        sn = _make_sn("25582405002002")
+        assert check_utility_round_trip(response, sn).passed is True
 
 
 class TestExtendedErrorCheck:

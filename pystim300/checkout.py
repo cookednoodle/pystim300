@@ -220,6 +220,22 @@ class ExpectedConfiguration:
 # Identity & configuration checks
 # ---------------------------------------------------------------------------
 
+def _normalize_serial(serial: str) -> str:
+    """Canonicalize a STIM300 serial number for comparison.
+
+    The serial number is a fixed 'N' prefix followed by digits
+    (Figure 10-2 / Table 5-15). The Init-Mode ``SerialNumberDatagram``
+    strips the prefix while the Utility-Mode ``$isn`` response keeps it,
+    so the two paths must be normalized before they can be compared.
+    Upper-cases, strips surrounding whitespace, and drops a single
+    leading 'N'.
+    """
+    s = serial.strip().upper()
+    if s.startswith("N"):
+        s = s[1:]
+    return s
+
+
 def check_part_number(pn: PartNumberDatagram,
                        expected: Optional[str]) -> CheckResult:
     if expected is None:
@@ -249,7 +265,10 @@ def check_serial_number(sn: SerialNumberDatagram,
             detail="not checked (no allowed set); got {0}".format(sn.serial_number),
             measured=sn.serial_number,
         )
-    ok = sn.serial_number in allowed
+    # Normalize both sides so an allowed entry may carry the 'N' prefix
+    # (as Utility Mode reports it) or omit it (as Init Mode reports it).
+    norm_allowed = {_normalize_serial(a) for a in allowed}
+    ok = _normalize_serial(sn.serial_number) in norm_allowed
     return CheckResult(
         name="serial_number",
         passed=ok,
@@ -670,7 +689,9 @@ def check_utility_round_trip(response: UtilityResponse,
         )
     reported = response.fields[0].strip()
     expected = init_serial.serial_number
-    ok = reported == expected
+    # Utility Mode reports the serial with its fixed 'N' prefix; the
+    # Init-Mode datagram strips it. Normalize before comparing.
+    ok = _normalize_serial(reported) == _normalize_serial(expected)
     return CheckResult(
         name="utility_round_trip",
         passed=ok,
