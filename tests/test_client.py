@@ -83,6 +83,16 @@ class TestServiceFlow:
         assert "REV = -" in response.lines
         assert response.raw == banner
 
+    def test_enter_service_flushes_stale_input(self):
+        # SERVICEMODE is sent while Normal-Mode binary is streaming; the OS
+        # serial backlog must be flushed first so the banner is not delayed
+        # or lost behind it.
+        banner = b"PRODUCT = STIM300\r>"
+        transport = FakeTransport(initial=banner)
+        client = STIM300(transport)
+        client.enter_service()
+        assert transport.reset_input_calls == 1
+
     def test_service_command_round_trip_with_audit(self):
         # Pre-load entry banner + response to "i m".
         banner = b"OK\r>"
@@ -182,6 +192,28 @@ class TestUtilityFlow:
         assert resp.command == "UTILITYMODE"
         assert resp.status == 0
         assert b"UTILITYMODE\r" in bytes(transport.written)
+
+    def test_enter_utility_flushes_before_writing(self):
+        # The OS serial backlog must be flushed BEFORE the UTILITYMODE write:
+        # flushing afterwards would discard the device's #UTILITYMODE,234 ack
+        # (the real-hardware timeout that motivated this).
+        events = []
+
+        class RecordingTransport(FakeTransport):
+            def reset_input(self) -> None:
+                events.append("reset")
+                super().reset_input()
+
+            def write(self, data: bytes) -> None:
+                events.append("write")
+                super().write(data)
+
+        ack = _utility_response("#UTILITYMODE,")
+        transport = RecordingTransport(initial=ack)
+        client = STIM300(transport)
+        client.enter_utility()
+        assert client.mode == Mode.UTILITY
+        assert events == ["reset", "write"]
 
     def test_enter_utility_skips_binary_datagram_preamble(self):
         # Per the §8.8 note the device finishes the in-progress Normal-Mode
