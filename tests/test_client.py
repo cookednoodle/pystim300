@@ -166,6 +166,22 @@ class TestUtilityFlow:
         assert resp.status == 0
         assert b"UTILITYMODE\r" in bytes(transport.written)
 
+    def test_enter_utility_skips_binary_datagram_preamble(self):
+        # Per the §8.8 note the device finishes the in-progress Normal-Mode
+        # datagram before acknowledging; that binary tail carries stray 0x0D
+        # bytes. enter_utility must skip past them to the ack rather than
+        # latching on the first CR (the real-hardware hang).
+        preamble = b"\x92\x0d\x47\x00\x0d\x8e\xff\x0d\x01"
+        ack = _utility_response("#UTILITYMODE,")
+        transport = FakeTransport(initial=preamble + ack)
+        client = STIM300(transport)
+        resp = client.enter_utility()
+        assert client.mode == Mode.UTILITY
+        assert resp.command == "UTILITYMODE"
+        assert resp.status == 0
+        # raw is the clean acknowledgement only - binary preamble excluded.
+        assert resp.raw == ack
+
     def test_utility_command_round_trip(self):
         ack = _utility_response("#UTILITYMODE,")
         isn_response = _utility_response("#isn,0,N123456789ABCDE,")
