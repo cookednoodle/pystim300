@@ -514,10 +514,10 @@ class TestEndToEndCheckout:
 
     def test_clean_run_all_pass(self):
         demo = self._load_demo()
-        transport = demo._build_demo_transport(measurement_count=50)
+        transport = demo.build_demo_transport(measurement_count=50)
         report = demo.run_checkout(
             transport,
-            demo._demo_expected_configuration(),
+            demo.demo_expected_configuration(),
             measurement_count=50,
             measurement_duration=50 / 2000.0,
         )
@@ -525,8 +525,8 @@ class TestEndToEndCheckout:
 
     def test_serial_mismatch_fails_only_serial_check(self):
         demo = self._load_demo()
-        transport = demo._build_demo_transport(measurement_count=50)
-        expected = demo._demo_expected_configuration()
+        transport = demo.build_demo_transport(measurement_count=50)
+        expected = demo.demo_expected_configuration()
         # Replace the allowed serial set with a non-matching one.
         from dataclasses import replace
         bad_expected = replace(expected, serial_numbers=frozenset({"99999999999999"}))
@@ -543,8 +543,8 @@ class TestEndToEndCheckout:
 
     def test_configuration_mismatch_fails_only_that_field(self):
         demo = self._load_demo()
-        transport = demo._build_demo_transport(measurement_count=50)
-        expected = demo._demo_expected_configuration()
+        transport = demo.build_demo_transport(measurement_count=50)
+        expected = demo.demo_expected_configuration()
         from dataclasses import replace
         bad = replace(expected, sample_rate_hz=1000)   # demo synthesizes 2000
         report = demo.run_checkout(
@@ -558,11 +558,11 @@ class TestEndToEndCheckout:
 
     def test_writes_json_report(self, tmp_path):
         demo = self._load_demo()
-        transport = demo._build_demo_transport(measurement_count=20)
+        transport = demo.build_demo_transport(measurement_count=20)
         out = tmp_path / "report.json"
         report = demo.run_checkout(
             transport,
-            demo._demo_expected_configuration(),
+            demo.demo_expected_configuration(),
             measurement_count=20,
             measurement_duration=20 / 2000.0,
             report_path=out,
