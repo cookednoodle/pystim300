@@ -1,25 +1,32 @@
 """Functional-checkout demo wiring the pystim300 primitives end-to-end.
 
-Drives ``pystim300.checkout`` against a ``FakeTransport`` pre-loaded with
-synthesized Init-Mode bytes, quiescent Normal-Mode frames, Service-Mode
-and Utility-Mode responses, and a clean Extended Error datagram. Runs
-the full checkout sequence and prints + writes the report.
+Runs the full checkout sequence - Init-Mode capture, a quiescent
+measurement window, Service-/Utility-Mode round-trips, and an Extended
+Error request - then prints and optionally writes a JSON report.
 
-This is a demonstration of the recommended composition pattern. A real
-hardware test harness sits downstream of this repo and:
+Two transports are supported:
 
-    1. Controls power to the unit (out of scope here).
-    2. Opens a ``SerialTransport`` once the unit has powered up.
-    3. Calls ``run_checkout(transport, expected, report_path=...)``.
+* **Synthetic demo** (default, no ``--port``): a ``FakeTransport``
+  pre-loaded with synthesized device traffic from
+  ``examples/demo_transport``. Runs anywhere, no hardware needed.
+* **Real hardware** (``--port``): a ``SerialTransport`` talking to an
+  actual STIM300. By default the checkout issues a commanded reset
+  (``R``) so the unit re-emits its Init-Mode sequence regardless of how
+  long it has been running; ``--no-reset`` instead waits for the
+  operator to power-cycle the unit.
 
-The structure of ``run_checkout`` below is intended to be copied and
-adapted (the harness substitutes its own clock, transport, and
+The structure of ``run_checkout`` is intended to be copied and adapted
+by a downstream harness (substituting its own clock, transport, and
 ``ExpectedConfiguration``); the individual ``check_*`` primitives from
 ``pystim300.checkout`` are stable building blocks.
 
-Usage (demo / smoke check)::
+Usage::
 
+    # Synthetic demo (no hardware):
     python examples/functional_checkout.py [--out report.json]
+
+    # Real STIM300 on a serial port:
+    python examples/functional_checkout.py --port /dev/ttyUSB0 [--no-reset]
 """
 
 import argparse
@@ -36,7 +43,6 @@ from pystim300 import (
     CheckoutReport,
     ExpectedConfiguration,
     ExtendedErrorDatagram,
-    FakeTransport,
     InitSequence,
     Measurement,
     MemoryAuditor,
@@ -61,22 +67,13 @@ from pystim300 import (
     check_utility_round_trip,
 )
 from pystim300.checkout import CheckResult
-from pystim300.crc import crc32_stim300, crc8_stim300
-from pystim300.datagrams import (
-    BIAS_TRIM_IDS,
-    BIAS_TRIM_PAYLOAD_LENGTH,
-    EXTENDED_ERROR_IDS,
-    EXTENDED_ERROR_PAYLOAD_LENGTH,
-    PART_NUMBER_IDS,
-    PART_NUMBER_PAYLOAD_LENGTH,
-    SERIAL_NUMBER_IDS,
-    SERIAL_NUMBER_PAYLOAD_LENGTH,
+from pystim300.exceptions import TimeoutError
+from pystim300.transport import SerialTransport, Transport
+
+from examples.demo_transport import (
+    build_demo_transport,
+    demo_expected_configuration,
 )
-from pystim300.normal import (
-    SPECIAL_SPECS,
-    build_normal_frame,
-)
-from pystim300.transport import Transport
 
 
 # ---------------------------------------------------------------------------
@@ -92,17 +89,22 @@ def run_checkout(transport: Transport,
                   service_round_trip: bool = True,
                   utility_round_trip: bool = True,
                   read_extended_error: bool = True,
+                  reset_first: bool = False,
                   init_timeout: float = 5.0,
                   report_path: Optional[pathlib.Path] = None,
                   ) -> CheckoutReport:
     """Run the full functional-checkout procedure against ``transport``.
 
-    The transport is assumed to be connected to a STIM300 that has just
-    been powered up. Power control is the caller's responsibility.
+    The transport is assumed to be connected to a STIM300. With
+    ``reset_first`` the checkout issues a commanded reset (``R``) so the
+    device re-emits its Init-Mode sequence; otherwise the device is
+    assumed to have just been power-cycled. Power control is the
+    caller's responsibility.
 
     Steps:
 
-        1. Drain Init-Mode datagrams (PN + SN + CFG [+ BT]).
+        1. (Optionally reset, then) drain Init-Mode datagrams
+           (PN + SN + CFG [+ BT]).
         2. Check identity and configuration against ``expected``.
         3. Collect ``measurement_count`` quiescent frames.
         4. Run stream-health + physics checks on the frames.
@@ -113,10 +115,15 @@ def run_checkout(transport: Transport,
     """
     auditor = MemoryAuditor()
     client = STIM300(transport, audit=auditor, timeout=init_timeout)
-    client.set_mode(Mode.INIT)
     checks: List[CheckResult] = []
 
     # --- 1. Init-Mode capture ----------------------------------------
+    # ``reset()`` requires NORMAL/UNKNOWN mode; a freshly-constructed
+    # client is UNKNOWN, so issue the reset before forcing any mode.
+    if reset_first:
+        client.reset()
+    else:
+        client.set_mode(Mode.INIT)
     init = client.read_init_sequence(timeout=init_timeout)
     checks.append(check_part_number(init.part_number, expected.part_number))
     checks.append(check_serial_number(init.serial_number, expected.serial_numbers))
@@ -177,11 +184,10 @@ def run_checkout(transport: Transport,
     # --- 6. Extended Error -------------------------------------------
     eed: Optional[ExtendedErrorDatagram] = None
     if read_extended_error:
-        client.request_extended_error()
-        for record in client.read_records(limit=10, timeout=init_timeout):
-            if isinstance(record, ExtendedErrorDatagram):
-                eed = record
-                break
+        try:
+            eed = client.read_extended_error(timeout=init_timeout)
+        except TimeoutError:
+            eed = None
         checks.append(check_extended_error_clean(
             eed, ignore_bits=expected.extended_error_ignore_bits))
 
@@ -203,183 +209,22 @@ def run_checkout(transport: Transport,
     return report
 
 
-# ---------------------------------------------------------------------------
-# Demo: build a FakeTransport with synthesized device traffic and run the
-# checkout against it.
-# ---------------------------------------------------------------------------
+def hardware_expected_configuration() -> ExpectedConfiguration:
+    """Expected values + thresholds for a real STIM300 on the bench.
 
-# Configuration payload byte layout (Table 5-16, p.31). The demo uses a
-# datagram with acceleration + inclination + temperature, sample rate
-# 2000 Hz, no PPS, no CRLF, bias_trim_at_startup=False, 1843200 baud.
-_DEMO_PART_NUMBER = "8420005000000-A"
-_DEMO_SERIAL_NUMBER = "12345678901234"
-
-
-def _build_special_frame(datagram_id: int, payload: bytes) -> bytes:
-    spec = SPECIAL_SPECS[datagram_id]
-    assert len(payload) == spec.payload_length, \
-        "payload length {0} != spec {1}".format(len(payload), spec.payload_length)
-    id_and_payload = bytes([datagram_id]) + payload
-    crc = crc32_stim300(id_and_payload + b"\x00" * spec.dummy_bytes)
-    frame = id_and_payload + crc.to_bytes(4, "big")
-    if datagram_id in {PART_NUMBER_IDS[1], SERIAL_NUMBER_IDS[1], 0xBD,
-                       BIAS_TRIM_IDS[1], EXTENDED_ERROR_IDS[1]}:
-        frame += b"\r\n"
-    return frame
-
-
-def _demo_part_number_payload() -> bytes:
-    # Pack "8420005000000-A" into the nibble layout of Table 5-14.
-    # Easier: just zero the payload; the demo doesn't assert the decoded
-    # part_number, only that the datagram itself is captured.
-    return bytes(PART_NUMBER_PAYLOAD_LENGTH)
-
-
-def _demo_serial_number_payload() -> bytes:
-    # Bytes: 'N' followed by 7 BCD bytes encoding "12345678901234".
-    payload = bytearray(SERIAL_NUMBER_PAYLOAD_LENGTH)
-    payload[0] = ord("N")
-    payload[1] = 0x12
-    payload[2] = 0x34
-    payload[3] = 0x56
-    payload[4] = 0x78
-    payload[5] = 0x90
-    payload[6] = 0x12
-    payload[7] = 0x34
-    return bytes(payload)
-
-
-def _demo_configuration_payload() -> bytes:
-    """Hand-built Configuration payload matching the demo's intent.
-
-    See Table 5-16 (pp.31-33) for the bit layout. The decoded values
-    cross-checked by the demo's ExpectedConfiguration are:
-
-        revision_char='-', sample_rate_hz=2000, bit_rate=1843200,
-        has_acceleration=True, has_inclination=True, has_temperature=True,
-        has_pps=False, crlf_termination=False, bias_trim_at_startup=False.
+    A per-unit, per-environment starting point - edit to match the unit
+    under test. Identity fields are left ``None`` so the part/serial
+    number are reported but not gated (they are unit-specific); set
+    ``serial_numbers`` to enforce a particular unit. Structural fields
+    match a standard STIM300 streaming configuration. Physics thresholds
+    are loosened from the synthetic-demo values to tolerate real benchtop
+    noise, vibration, and ambient temperature.
     """
-    p = bytearray(21)
-    p[0] = ord("-")                                  # revision_char
-    p[1] = 31                                         # firmware_revision
-    # Byte 3: sample rate code 4 (2000Hz)<<5 | has_pps=0 | has_temp=1 | has_incl=1 | has_accel=1 | crlf=0
-    p[2] = (0b100 << 5) | 0x08 | 0x04 | 0x02         # = 0x8E
-    # Byte 4: bit_rate code 3 (1843200) << 4 | stop_bits=1(bit3=0) | parity=00 | line_term=0
-    p[3] = (0b0011 << 4)                              # = 0x30
-    # Bytes 5-7 (gyro): all axes active, unit 0 (angular rate), LP filter 4 (262 Hz)
-    p[4] = 0x70                                       # axes XYZ active, unit 0
-    p[5] = (0b100 << 4) | 0b100                       # X+Y LP filter = 262
-    p[6] = (0b100 << 4) | 0                           # Z LP filter = 262, g-comp = 0
-    # Bytes 8-10 (accel): all axes, unit 0 ([g]), LP filter 4
-    p[7] = 0x70
-    p[8] = (0b100 << 4) | 0b100
-    p[9] = (0b100 << 4)
-    # Bytes 11-13 (incl): all axes, unit 0 ([g]), LP filter 4
-    p[10] = 0x70
-    p[11] = (0b100 << 4) | 0b100
-    p[12] = (0b100 << 4) | 0                          # incl Z LP=262, PPS unit 0
-    # Byte 14: has_aux_input=0 (so has_pps_input bit is 0), PPS LP filter = 4
-    p[13] = 0b100                                     # has_pps_input=0 -> has_aux_input=True
-    # Bytes 15-20: ranges. accel_range_g code 0 = 10g (high+low nibble per axis).
-    p[16] = 0x00                                      # X (high) + Y (low) = 10g
-    p[17] = 0x00                                      # Z (high)
-    # Byte 21: TOV logic 5.0V (bit3=0), tov_toggling=0, bias_trim_at_startup=0
-    p[20] = 0
-    return bytes(p)
-
-
-def _demo_extended_error_payload() -> bytes:
-    """All-zero payload -> error_bits == 0 -> all checks pass."""
-    return bytes(EXTENDED_ERROR_PAYLOAD_LENGTH)
-
-
-def _make_demo_measurement_bytes(num_frames: int) -> bytes:
-    """Synthesize ``num_frames`` of quiescent Normal-Mode bytes.
-
-    Uses a freshly-decoded Configuration that matches what the
-    Configuration datagram in the Init sequence decodes to. The
-    measurements have:
-
-        - gyro:  (0.01, -0.02, 0.005) deg/s (within quiescence bounds)
-        - accel: (0, 0, 1) g            -> gravity along +Z
-        - incl:  (0, 0, 1) g
-        - temp:  25 degC across all clusters
-        - counter wraps at 256 modulo
-    """
-    # Build a Configuration by parsing the synthesized payload, so the
-    # decoded configuration here is bit-for-bit identical to what the
-    # checkout will receive.
-    from pystim300.configuration import decode_configuration
-    cfg = decode_configuration(_demo_configuration_payload())
-
-    from pystim300.normal import Measurement
-    from pystim300.status import StatusByte
-    sb = StatusByte.decode(0)
-    out = bytearray()
-    for i in range(num_frames):
-        m = Measurement(
-            datagram_id=cfg.datagram_id,
-            counter=i % 256,
-            latency_us=1500,
-            gyro=(0.01, -0.02, 0.005),
-            gyro_status=sb,
-            accel=(0.0, 0.0, 1.0),
-            accel_status=sb,
-            incl=(0.0, 0.0, 1.0),
-            incl_status=sb,
-            gyro_temp=(25.0, 25.0, 25.0),
-            gyro_temp_status=sb,
-            accel_temp=(25.0, 25.0, 25.0),
-            accel_temp_status=sb,
-            incl_temp=(25.0, 25.0, 25.0),
-            incl_temp_status=sb,
-        )
-        out.extend(build_normal_frame(m, cfg))
-    return bytes(out)
-
-
-def _utility_reply(body_no_crc: str) -> bytes:
-    """Build a Utility-Mode reply bytes from the body up to and including the trailing comma."""
-    crc = crc8_stim300(body_no_crc.encode("ascii"))
-    return (body_no_crc + str(crc) + "\r").encode("ascii")
-
-
-def _build_demo_transport(measurement_count: int) -> FakeTransport:
-    """Construct a FakeTransport pre-loaded with everything the checkout needs."""
-    # Initial bytes: Init-Mode sequence + N quiescent frames.
-    init_bytes = (
-        _build_special_frame(PART_NUMBER_IDS[0], _demo_part_number_payload())
-        + _build_special_frame(SERIAL_NUMBER_IDS[0], _demo_serial_number_payload())
-        + _build_special_frame(0xBC, _demo_configuration_payload())
-        # No bias-trim datagram (bias_trim_at_startup=False).
-    )
-    measurement_bytes = _make_demo_measurement_bytes(measurement_count)
-
-    # Scripted writes: each Service/Utility/E request triggers its reply.
-    service_banner = b"PRODUCT = STIM300\rREV = -\r>"
-    i_d_reply = b"datagram = a7,no\r>"
-    exit_service_reply = b"SYSTEM RETURNING TO NORMAL MODE.\r"
-    utility_ack = _utility_reply("#UTILITYMODE,")
-    isn_reply = _utility_reply("#isn,0,{0},".format(_DEMO_SERIAL_NUMBER))
-    xn_reply = _utility_reply("#xn,0,")
-    extended_error_frame = _build_special_frame(
-        EXTENDED_ERROR_IDS[0], _demo_extended_error_payload())
-
-    scripted = [
-        (b"SERVICEMODE\r", service_banner),
-        (b"i d\r", i_d_reply),
-        (b"x N\r", exit_service_reply),
-        (b"UTILITYMODE\r", utility_ack),
-        (b"$isn,", isn_reply),
-        (b"$xn,", xn_reply),
-        (b"E\r", extended_error_frame),
-    ]
-    return FakeTransport(initial=init_bytes + measurement_bytes, scripted=scripted)
-
-
-def _demo_expected_configuration() -> ExpectedConfiguration:
     return ExpectedConfiguration(
-        serial_numbers=frozenset({_DEMO_SERIAL_NUMBER}),
+        # Identity - reported, not gated. Set serial_numbers to enforce.
+        part_number=None,
+        serial_numbers=None,
+        # Structural cross-check - standard streaming configuration.
         sample_rate_hz=2000,
         bit_rate=1843200,
         has_acceleration=True,
@@ -388,15 +233,17 @@ def _demo_expected_configuration() -> ExpectedConfiguration:
         has_pps=False,
         crlf_termination=False,
         bias_trim_at_startup=False,
+        # Stream / framing.
         max_latency_us=2000,
-        sample_rate_tolerance_pct=5.0,        # demo runs much faster than real-time
+        sample_rate_tolerance_pct=5.0,
+        # Physics - loosened for a real, still unit on a bench.
         temp_min_c=0.0,
-        temp_max_c=50.0,
-        gyro_max_mean_dps=0.5,
+        temp_max_c=60.0,
+        gyro_max_mean_dps=1.0,
         gyro_max_std_dps=2.0,
         gravity_magnitude_g=1.0,
-        gravity_tolerance_g=0.05,
-        gravity_direction_std_g=0.01,
+        gravity_tolerance_g=0.1,
+        gravity_direction_std_g=0.05,
     )
 
 
@@ -404,22 +251,53 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=pathlib.Path, default=None,
                         help="Write the JSON report to this path.")
-    parser.add_argument("--measurements", type=int, default=200,
-                        help="How many quiescent frames to synthesize and collect.")
+    parser.add_argument("--port", default=None,
+                        help="Serial port of a real STIM300 (e.g. /dev/ttyUSB0). "
+                             "Omit to run the synthetic demo.")
+    parser.add_argument("--bit-rate", type=int, default=1843200,
+                        help="Serial bit rate, real hardware only "
+                             "(STIM300 factory default 1843200).")
+    parser.add_argument("--no-reset", action="store_true",
+                        help="Real hardware only: skip the commanded reset and "
+                             "wait for the operator to power-cycle the unit.")
+    parser.add_argument("--measurements", type=int, default=None,
+                        help="Quiescent frames to collect "
+                             "(default 200 for the demo, 2000 for real hardware).")
     args = parser.parse_args(argv)
 
-    transport = _build_demo_transport(measurement_count=args.measurements)
-    # The FakeTransport delivers all bytes instantly, so use a synthetic
-    # duration matching the configured sample rate for the frame-rate
-    # check. A real harness omits this argument and uses wall-clock time.
-    synthetic_duration = args.measurements / 2000.0
-    report = run_checkout(
-        transport,
-        _demo_expected_configuration(),
-        measurement_count=args.measurements,
-        measurement_duration=synthetic_duration,
-        report_path=args.out,
-    )
+    if args.port is None:
+        # --- Synthetic demo ------------------------------------------
+        count = args.measurements if args.measurements is not None else 200
+        transport = build_demo_transport(measurement_count=count)
+        # The FakeTransport delivers all bytes instantly, so use a
+        # synthetic duration matching the configured sample rate for the
+        # frame-rate check. Real hardware omits this and uses wall-clock.
+        report = run_checkout(
+            transport,
+            demo_expected_configuration(),
+            measurement_count=count,
+            measurement_duration=count / 2000.0,
+            report_path=args.out,
+        )
+        return 0 if report.passed() else 1
+
+    # --- Real hardware ----------------------------------------------
+    count = args.measurements if args.measurements is not None else 2000
+    reset_first = not args.no_reset
+    if reset_first:
+        print("Connecting to {0}; issuing commanded reset (R)...".format(args.port))
+    else:
+        print("Connecting to {0}; power-cycle the STIM300 now - "
+              "waiting for Init-Mode datagrams...".format(args.port))
+    with SerialTransport(args.port, bit_rate=args.bit_rate) as transport:
+        report = run_checkout(
+            transport,
+            hardware_expected_configuration(),
+            measurement_count=count,
+            reset_first=reset_first,
+            init_timeout=20.0,
+            report_path=args.out,
+        )
     return 0 if report.passed() else 1
 
 

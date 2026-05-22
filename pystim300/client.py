@@ -19,6 +19,7 @@ from pystim300 import utility as _utility
 from pystim300.configuration import Configuration
 from pystim300.datagrams import (
     BiasTrimDatagram,
+    ExtendedErrorDatagram,
     PartNumberDatagram,
     SerialNumberDatagram,
 )
@@ -603,3 +604,39 @@ class STIM300:
                 limit -= 1
                 if limit <= 0:
                     return
+
+    def read_extended_error(self, *, timeout: float = 5.0) -> ExtendedErrorDatagram:
+        """Request the Extended Error Information datagram and return it.
+
+        Flushes the OS serial input buffer and the client carry-over,
+        sends the Normal-Mode ``E\\r`` trigger, then reads records until
+        the ``ExtendedErrorDatagram`` arrives (Table 5-18).
+
+        The flush is essential. After a Utility-Mode round-trip up to a
+        full ``_READ_CHUNK`` of stale Normal-Mode datagrams sits in the
+        carry-over and the OS buffer ahead of the response; a fixed-size
+        record scan would exhaust its budget on that backlog before
+        reaching the Extended Error datagram. Flushing first is safe -
+        the device has not yet seen the ``E`` request, so its response
+        cannot have been sent yet - and puts it within the first few
+        records.
+
+        Raises ``TimeoutError`` if no Extended Error datagram arrives
+        within ``timeout`` seconds.
+        """
+        if self._normal_parser is None or self._configuration is None:
+            raise ModeError("read_extended_error requires a known configuration; "
+                            "call read_init_sequence or set_configuration first")
+        if self._mode not in (Mode.NORMAL, Mode.UNKNOWN):
+            raise ModeError("read_extended_error requires NORMAL mode, "
+                            "currently {0}".format(self._mode))
+        self._transport.reset_input()
+        self._carryover = b""
+        self.request_extended_error()
+        deadline = self._clock() + timeout
+        for record in self.read_records(timeout=timeout):
+            if isinstance(record, ExtendedErrorDatagram):
+                return record
+            if self._clock() >= deadline:
+                break
+        raise TimeoutError("no Extended Error datagram within {0}s".format(timeout))

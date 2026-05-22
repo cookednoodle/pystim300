@@ -15,6 +15,9 @@ from pystim300.datagrams import (
     BIAS_TRIM_IDS,
     BIAS_TRIM_PAYLOAD_LENGTH,
     BiasTrimDatagram,
+    EXTENDED_ERROR_IDS,
+    EXTENDED_ERROR_PAYLOAD_LENGTH,
+    ExtendedErrorDatagram,
     PART_NUMBER_IDS,
     PART_NUMBER_PAYLOAD_LENGTH,
     PartNumberDatagram,
@@ -463,3 +466,48 @@ class TestReset:
         client.request_bias_trim()
         client.request_extended_error()
         assert bytes(transport.written) == b"N\rI\rC\rT\rE\r"
+
+
+class TestReadExtendedError:
+    def test_returns_extended_error_datagram(self):
+        cfg = make_configuration()
+        eed_frame = _build_special_frame(EXTENDED_ERROR_IDS[0],
+                                           bytes(EXTENDED_ERROR_PAYLOAD_LENGTH))
+        transport = FakeTransport(scripted=[(b"E\r", eed_frame)])
+        client = STIM300(transport, configuration=cfg)
+
+        eed = client.read_extended_error(timeout=2.0)
+        assert isinstance(eed, ExtendedErrorDatagram)
+        assert eed.error_bits == 0
+        assert bytes(transport.written) == b"E\r"
+
+    def test_flushes_input_before_request(self):
+        cfg = make_configuration()
+        eed_frame = _build_special_frame(EXTENDED_ERROR_IDS[0],
+                                           bytes(EXTENDED_ERROR_PAYLOAD_LENGTH))
+        transport = FakeTransport(scripted=[(b"E\r", eed_frame)])
+        client = STIM300(transport, configuration=cfg)
+
+        client.read_extended_error(timeout=2.0)
+        assert transport.reset_input_calls == 1
+
+    def test_skips_records_before_datagram(self):
+        # A stale record sits ahead of the Extended Error datagram; the
+        # scan must walk past it rather than give up.
+        cfg = make_configuration()
+        stale = _build_special_frame(PART_NUMBER_IDS[0],
+                                       bytes(PART_NUMBER_PAYLOAD_LENGTH))
+        eed_frame = _build_special_frame(EXTENDED_ERROR_IDS[0],
+                                           bytes(EXTENDED_ERROR_PAYLOAD_LENGTH))
+        transport = FakeTransport(scripted=[(b"E\r", stale + eed_frame)])
+        client = STIM300(transport, configuration=cfg)
+
+        eed = client.read_extended_error(timeout=2.0)
+        assert isinstance(eed, ExtendedErrorDatagram)
+
+    def test_timeout_when_no_datagram(self):
+        cfg = make_configuration()
+        transport = FakeTransport(initial=b"")
+        client = STIM300(transport, configuration=cfg)
+        with pytest.raises(TimeoutError):
+            client.read_extended_error(timeout=0.01)

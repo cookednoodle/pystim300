@@ -59,12 +59,11 @@ from pystim300 import (
 )
 
 # Re-use the synthesized FakeTransport + ExpectedConfiguration from the
-# procedural demo so the two checkouts exercise identical bytes on the
-# wire. ``functional_checkout`` is importable as a module because its
-# ``main()`` is guarded by ``if __name__ == "__main__"``.
-from examples.functional_checkout import (
-    _build_demo_transport,
-    _demo_expected_configuration,
+# demo-traffic module so the two checkouts exercise identical bytes on
+# the wire.
+from examples.demo_transport import (
+    build_demo_transport,
+    demo_expected_configuration,
 )
 
 
@@ -95,7 +94,7 @@ _DEMO_CONFIG_FIELDS = (
 @pytest.fixture(scope="module")
 def expected():
     """The demo's ``ExpectedConfiguration``."""
-    return _demo_expected_configuration()
+    return demo_expected_configuration()
 
 
 @pytest.fixture(scope="module")
@@ -115,7 +114,7 @@ def checkout_session(expected):
         * ``eed``              - the ExtendedErrorDatagram from ``E``
         * ``auditor``          - the full MemoryAuditor for inspection
     """
-    transport = _build_demo_transport(measurement_count=MEASUREMENT_COUNT)
+    transport = build_demo_transport(measurement_count=MEASUREMENT_COUNT)
     auditor = MemoryAuditor()
     client = STIM300(transport, audit=auditor, timeout=5.0)
     client.set_mode(Mode.INIT)
